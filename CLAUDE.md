@@ -89,6 +89,11 @@ Dictation shortcut (outside the brief, done):
   double-tap timer belongs to `AppState` and `SetupTestHotkeyHarness`, which
   call `handleDoubleTapWindowExpiration(timestamp:)` when it fires.
 
+Upstream sync (2026-10-24): zachlatta/freeflow `main` (v1.3.2) merged; its EMPTY
+filler-only clarification is folded into the fork prompt, and its dictation-language
+directive stays a no-op while Transcription Language is on Auto-detect. Rejected:
+the full-desktop screenshot fallback setting (b7d6cbd), which is screen capture.
+
 ## Do not modify
 
 - `Sources/GlobalShortcutBackend.swift`

@@ -7,6 +7,8 @@ struct AppSelectionSnapshot {
     let bundleIdentifier: String?
     let windowTitle: String?
     let selectedText: String?
+    let textInsertionTarget: AppTextInsertionTarget?
+    let usesOriginalFieldInsertion: Bool
 }
 
 struct AppContext {
@@ -21,10 +23,14 @@ struct AppContext {
     var contextSummary: String {
         currentActivity
     }
+
+    var summaryForPostProcessing: String {
+        ContextInferenceFailure.usableSummary(currentActivity)
+    }
 }
 
 final class AppContextService {
-    static let defaultContextModel = "qwen/qwen3.6-27b"
+    static let defaultContextModel = "qwen/qwen3.8-27b"
     static let defaultContextPrompt = """
 You are a context synthesis assistant for a speech-to-text pipeline.
 Given app/window metadata, output exactly two sentences that describe what the user is doing right now and the likely writing intent in the current window.
@@ -61,22 +67,30 @@ Return only two sentences, no labels, no markdown, no extra commentary.
         return trimmedPrompt.isEmpty ? Self.defaultContextPrompt : trimmedPrompt
     }
 
-    func collectSelectionSnapshot() -> AppSelectionSnapshot {
+    /// Captures the mode and optional target together; off skips insertion-target reads.
+    func collectSelectionSnapshot(captureInsertionTarget: Bool = false) -> AppSelectionSnapshot {
         guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
             return AppSelectionSnapshot(
                 appName: nil,
                 bundleIdentifier: nil,
                 windowTitle: nil,
-                selectedText: nil
+                selectedText: nil,
+                textInsertionTarget: nil,
+                usesOriginalFieldInsertion: captureInsertionTarget
             )
         }
 
         let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
+        let textInsertionTarget = captureInsertionTarget ? AppTextInsertionTarget.capture(
+            from: appElement, processIdentifier: frontmostApp.processIdentifier
+        ) : nil
         return AppSelectionSnapshot(
             appName: frontmostApp.localizedName,
             bundleIdentifier: frontmostApp.bundleIdentifier,
             windowTitle: focusedWindowTitle(from: appElement) ?? frontmostApp.localizedName,
-            selectedText: rawSelectedText(from: appElement)
+            selectedText: !captureInsertionTarget || textInsertionTarget != nil ? rawSelectedText(from: appElement) : nil,
+            textInsertionTarget: textInsertionTarget,
+            usesOriginalFieldInsertion: captureInsertionTarget
         )
     }
 
@@ -104,31 +118,22 @@ Return only two sentences, no labels, no markdown, no extra commentary.
         let currentActivity: String
         let contextPrompt: String?
         if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let result = await inferActivityWithLLM(
+            switch await inferActivityWithLLM(
                 appName: appName,
                 bundleIdentifier: bundleIdentifier,
                 windowTitle: windowTitle,
                 selectedText: selectedText,
                 contextSystemPrompt: contextSystemPrompt
             ) {
+            case .success(let result):
                 currentActivity = result.activity
                 contextPrompt = result.prompt
-            } else {
-                currentActivity = fallbackCurrentActivity(
-                    appName: appName,
-                    bundleIdentifier: bundleIdentifier,
-                    selectedText: selectedText,
-                    windowTitle: windowTitle
-                )
+            case .failure(let error):
+                currentActivity = error.summary
                 contextPrompt = nil
             }
         } else {
-            currentActivity = fallbackCurrentActivity(
-                appName: appName,
-                bundleIdentifier: bundleIdentifier,
-                selectedText: selectedText,
-                windowTitle: windowTitle
-            )
+            currentActivity = ContextInferenceFailure.missingAPIKey.summary
             contextPrompt = nil
         }
 
@@ -149,7 +154,7 @@ Return only two sentences, no labels, no markdown, no extra commentary.
         windowTitle: String?,
         selectedText: String?,
         contextSystemPrompt: String
-    ) async -> (activity: String, prompt: String)? {
+    ) async -> Result<(activity: String, prompt: String), ContextInferenceFailure> {
         let model = contextModel
         do {
             var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
@@ -168,7 +173,7 @@ Selected text: \(selectedText ?? "None")
             let userMessage = "Analyze the context and infer the user's current activity in exactly two sentences.\n\n\(metadata)"
             let fullPrompt = "Model: \(model)\n\n[System]\n\(contextSystemPrompt)\n[User]\n\(userMessage)"
 
-            let payload: [String: Any] = [
+            var payload: [String: Any] = [
                 "model": model,
                 "temperature": 0.2,
                 "messages": [
@@ -177,27 +182,44 @@ Selected text: \(selectedText ?? "None")
                 ]
             ]
 
+            payload.merge(Self.inferenceRequestOptions(for: model)) { _, option in option }
+
             request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
             let (data, response) = try await LLMAPITransport.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
-                return nil
+                return .failure(.invalidResponse)
             }
-            guard httpResponse.statusCode == 200 else {
-                return nil
-            }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let firstChoice = choices.first,
-                  let message = firstChoice["message"] as? [String: Any],
-                  let content = message["content"] as? String else {
-                return nil
-            }
-
-            guard let activity = Self.activitySummary(from: content, model: model) else { return nil }
-            return (activity: activity, prompt: fullPrompt)
+            return Self.inferenceResult(data: data, status: httpResponse.statusCode, model: model, prompt: fullPrompt)
         } catch {
-            return nil
+            if (error as? URLError)?.code == .timedOut { return .failure(.timeout) }
+            return .failure(.network)
         }
+    }
+
+    static func inferenceRequestOptions(for model: String) -> [String: Any] {
+        // Two sentences need a small completion budget. Leaving this unset
+        // can reserve more output tokens than Groq's free-tier TPM limit.
+        var options: [String: Any] = ["max_completion_tokens": 512]
+        let config = ModelConfiguration.config(for: model)
+        if let effort = config.reasoningEffort { options["reasoning_effort"] = effort }
+        if let include = config.includeReasoning { options["include_reasoning"] = include }
+        return options
+    }
+
+    static func inferenceResult(
+        data: Data, status: Int, model: String, prompt: String
+    ) -> Result<(activity: String, prompt: String), ContextInferenceFailure> {
+        guard status == 200 else { return .failure(.httpStatus(status)) }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            return .failure(.invalidResponse)
+        }
+        guard let activity = activitySummary(from: content, model: model) else {
+            return .failure(.emptySummary)
+        }
+        return .success((activity: activity, prompt: prompt))
     }
 
     static func activitySummary(from rawContent: String, model: String) -> String? {
@@ -223,16 +245,6 @@ Selected text: \(selectedText ?? "None")
 
         let firstTwo = sentences.prefix(2)
         return firstTwo.joined(separator: ". ") + "."
-    }
-
-    private func fallbackCurrentActivity(
-        appName: String?,
-        bundleIdentifier: String?,
-        selectedText: String?,
-        windowTitle: String?
-    ) -> String {
-        let activeApp = appName ?? "the active application"
-        return "Could not reliably infer a two-sentence summary for \(activeApp) from the visible metadata."
     }
 
     private func focusedWindowTitle(from appElement: AXUIElement) -> String? {

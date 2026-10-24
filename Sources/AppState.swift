@@ -272,8 +272,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         ("ca", "Catalan")
     ]
     static let defaultPostProcessingModel = "openai/gpt-oss-20b"
-    static let defaultPostProcessingFallbackModel = "qwen/qwen3.6-27b"
-    static let defaultContextModel = "qwen/qwen3.6-27b"
+    static let defaultPostProcessingFallbackModel = "qwen/qwen3.8-27b"
+    static let defaultContextModel = "qwen/qwen3.8-27b"
     private static let deprecatedDefaultPostProcessingFallbackModel = "meta-llama/llama-4-scout-17b-16e-instruct"
     private static let deprecatedDefaultContextModel = "meta-llama/llama-4-scout-17b-16e-instruct"
     private static let trailingPressEnterCommandPattern = try! NSRegularExpression(
@@ -288,6 +288,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var apiKey: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistAPIKey(apiKey)
             rebuildContextService()
         }
@@ -295,6 +296,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var apiBaseURL: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistAPIBaseURL(apiBaseURL)
             rebuildContextService()
         }
@@ -302,15 +304,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var transcriptionAPIURL: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistOptionalAPIValue(transcriptionAPIURL, account: transcriptionAPIURLStorageKey)
         }
     }
 
     @Published var transcriptionAPIKey: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistOptionalAPIValue(transcriptionAPIKey, account: transcriptionAPIKeyStorageKey)
         }
     }
+
+    // Publish only after the complete configuration transaction has persisted.
+    @Published private(set) var committedAPIConfiguration: ValidatedAPIConfiguration
 
     @Published var transcriptionModel: String {
         didSet {
@@ -487,6 +494,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var originalFieldInsertionEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(originalFieldInsertionEnabled, forKey: OriginalFieldInsertionPreference.storageKey)
+            updateInsertionAccessibilityPreparation()
+        }
+    }
+
     @Published var preserveClipboard: Bool {
         didSet {
             UserDefaults.standard.set(preserveClipboard, forKey: preserveClipboardStorageKey)
@@ -598,6 +612,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let pipelineHistoryStore = PipelineHistoryStore()
     private let shortcutSessionController = DictationShortcutSessionController()
     private var activeRecordingTriggerMode: RecordingTriggerMode?
+    private var activeTextInsertionTarget: AppTextInsertionTarget?
+    private var insertionAccessibilityCancellable: AnyCancellable?
+    private let insertionAccessibilityQueue = DispatchQueue(label: "FreeFlow.insertion-accessibility", qos: .utility)
+    private var activeOriginalFieldInsertionEnabled = false
+    private var textInsertionTargetID: UUID?
     private var currentSessionIntent: SessionIntent = .dictation
     private var pendingSelectionSnapshot: AppSelectionSnapshot?
     private var pendingManualCommandInvocation = false
@@ -613,6 +632,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var pendingMicrophonePermissionTriggerMode: RecordingTriggerMode?
     private var pendingMicrophonePermissionSelectionSnapshot: AppSelectionSnapshot?
     private var pendingMicrophonePermissionManualCommandRequested: Bool?
+    private var isApplyingAPIConfiguration = false
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
@@ -620,6 +640,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
         let apiKey = Self.loadStoredAPIKey(account: apiKeyStorageKey)
         let apiBaseURL = Self.loadStoredAPIBaseURL(account: "api_base_url")
+        for key in [contextModelStorageKey, postProcessingModelStorageKey, postProcessingFallbackModelStorageKey] {
+            ModelConfiguration.migrateGroqSelection(key: key, baseURL: apiBaseURL, defaults: .standard)
+        }
         let transcriptionModel = UserDefaults.standard.string(forKey: transcriptionModelStorageKey) ?? Self.defaultTranscriptionModel
         let transcriptionAPIURL = Self.loadOptionalStoredAPIValue(account: transcriptionAPIURLStorageKey)
         let transcriptionAPIKey = Self.loadStoredAPIKey(account: transcriptionAPIKeyStorageKey)
@@ -721,6 +744,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.apiBaseURL = apiBaseURL
         self.transcriptionAPIURL = transcriptionAPIURL
         self.transcriptionAPIKey = transcriptionAPIKey
+        self.committedAPIConfiguration = ValidatedAPIConfiguration(
+            apiKey: apiKey,
+            baseURL: apiBaseURL,
+            transcriptionAPIURL: transcriptionAPIURL,
+            transcriptionAPIKey: transcriptionAPIKey
+        )
         self.transcriptionModel = transcriptionModel
         self.postProcessingModel = postProcessingModel
         self.postProcessingFallbackModel = postProcessingFallbackModel
@@ -743,6 +772,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.customContextPromptLastModified = customContextPromptLastModified
         self.outputLanguage = outputLanguage
         self.shortcutStartDelay = shortcutStartDelay
+        self.originalFieldInsertionEnabled = OriginalFieldInsertionPreference.load(from: .standard)
         self.preserveClipboard = preserveClipboard
         self.preserveExactWording = preserveExactWording
         self.keepDictationInClipboardHistory = keepDictationInClipboardHistory
@@ -831,7 +861,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static let defaultAPIBaseURL = "https://api.groq.com/openai/v1"
+    static let defaultAPIBaseURL = APIConfigurationSaveFlow.defaultBaseURL
 
     private struct StoredShortcutConfiguration {
         let hold: ShortcutBinding
@@ -979,6 +1009,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    func updateAPIConfiguration(
+        apiKey: String,
+        baseURL: String,
+        transcriptionAPIURL: String,
+        transcriptionAPIKey: String
+    ) {
+        isApplyingAPIConfiguration = true
+        self.apiKey = apiKey
+        self.apiBaseURL = baseURL
+        self.transcriptionAPIURL = transcriptionAPIURL
+        self.transcriptionAPIKey = transcriptionAPIKey
+        isApplyingAPIConfiguration = false
+        persistAPIKey(apiKey)
+        persistAPIBaseURL(baseURL)
+        persistOptionalAPIValue(transcriptionAPIURL, account: transcriptionAPIURLStorageKey)
+        persistOptionalAPIValue(transcriptionAPIKey, account: transcriptionAPIKeyStorageKey)
+        rebuildContextService()
+        committedAPIConfiguration = ValidatedAPIConfiguration(
+            apiKey: apiKey,
+            baseURL: baseURL,
+            transcriptionAPIURL: transcriptionAPIURL,
+            transcriptionAPIKey: transcriptionAPIKey
+        )
+    }
+
     private func rebuildContextService() {
         contextService = makeAppContextService()
     }
@@ -1004,6 +1059,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private static func loadOptionalStoredAPIValue(account: String) -> String {
         let stored = AppSettingsStorage.load(account: account) ?? ""
         return stored.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// English name of the language selected in Transcription Language, which
+    /// cleanup is asked to keep. Empty on Auto-detect: nothing is detected from
+    /// the transcript.
+    private static func dictationLanguageName(for language: String) -> String {
+        let normalized = normalizeTranscriptionLanguage(language)
+        guard !normalized.isEmpty else { return "" }
+        return transcriptionLanguageOptions.first { $0.code == normalized }?.name ?? ""
     }
 
     private static func normalizeTranscriptionLanguage(_ language: String) -> String {
@@ -1214,6 +1278,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     customVocabulary: capturedCustomVocabulary,
                     customSystemPrompt: capturedCustomSystemPrompt,
                     outputLanguage: self.outputLanguage,
+                    dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                     preserveExactWording: self.preserveExactWording
                 )
                 finalTranscript = result.finalTranscript
@@ -1590,6 +1655,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     func startHotkeyMonitoring() {
         shouldMonitorHotkeys = true
+        updateInsertionAccessibilityPreparation()
         hotkeyManager.onShortcutEvent = { [weak self] event in
             DispatchQueue.main.async {
                 self?.handleShortcutEvent(event)
@@ -1601,8 +1667,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
         restartHotkeyMonitoring()
     }
 
+    private func updateInsertionAccessibilityPreparation() {
+        insertionAccessibilityCancellable = nil
+        guard shouldMonitorHotkeys, originalFieldInsertionEnabled else { return }
+        insertionAccessibilityCancellable = NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.prepareForegroundApplicationForInsertion() }
+        prepareForegroundApplicationForInsertion()
+    }
+
+    /// A role query lets Electron expose its editor before the start-time snapshot, without reading text.
+    private func prepareForegroundApplicationForInsertion() {
+        guard shouldMonitorHotkeys, originalFieldInsertionEnabled, AXIsProcessTrusted(),
+              let app = NSWorkspace.shared.frontmostApplication else { return }
+        let processIdentifier = app.processIdentifier
+        insertionAccessibilityQueue.async {
+            AppTextInsertionTarget.prepareAccessibility(processIdentifier: processIdentifier)
+        }
+    }
+
     func stopHotkeyMonitoring() {
         shouldMonitorHotkeys = false
+        insertionAccessibilityCancellable = nil
         hotkeyMonitoringErrorMessage = nil
         hotkeyManager.onShortcutEvent = nil
         hotkeyManager.onEscapeKeyPressed = nil
@@ -1695,6 +1782,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard isRecording else {
                 shortcutSessionController.reset()
                 activeRecordingTriggerMode = nil
+                activeTextInsertionTarget = nil
                 return
             }
             stopAndTranscribe()
@@ -1860,9 +1948,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// tap.
     private func cancelActiveShortcutSession() {
         cancelDoubleTapWindow()
+        textInsertionTargetID = nil
         cancelPendingShortcutStart()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
         audioRecorder.onRecordingReady = nil
         audioRecorder.onRecordingFailure = nil
         audioLevelCancellable?.cancel()
@@ -1890,6 +1980,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func cancelTranscription() {
         guard isTranscribing else { return }
 
+        textInsertionTargetID = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
         contextCaptureTask?.cancel()
@@ -1897,6 +1988,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         capturedContext = nil
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
         currentSessionIntent = .dictation
         isRecording = false
         isTranscribing = false
@@ -1916,9 +2008,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Invalidates prior insertion actions before taking the new start-time snapshot, including during delays.
     private func scheduleShortcutStart(mode: RecordingTriggerMode) {
+        textInsertionTargetID = nil
         cancelPendingShortcutStart(resetMode: false)
-        pendingSelectionSnapshot = contextService.collectSelectionSnapshot()
+        pendingSelectionSnapshot = contextService.collectSelectionSnapshot(captureInsertionTarget: originalFieldInsertionEnabled)
         pendingManualCommandInvocation = hotkeyManager.currentPressedModifiers.contains(
             commandModeManualModifier.shortcutModifier
         )
@@ -2002,6 +2096,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func rejectCommandModeSelectionRequirement(triggerMode: RecordingTriggerMode) {
         currentSessionIntent = .dictation
         activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
         pendingSelectionSnapshot = nil
         pendingManualCommandInvocation = false
         errorMessage = "Select text to transform first."
@@ -2018,6 +2113,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func rejectInvalidCommandModeModifier(triggerMode: RecordingTriggerMode, message: String) {
         currentSessionIntent = .dictation
         activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
         pendingSelectionSnapshot = nil
         pendingManualCommandInvocation = false
         errorMessage = message
@@ -2036,29 +2132,33 @@ final class AppState: ObservableObject, @unchecked Sendable {
         os_log(.info, log: recordingLog, "startRecording() entered")
         guard !isRecording && !isTranscribing else { return }
         let scheduledSelectionSnapshot = pendingSelectionSnapshot
+        let selectionSnapshot = scheduledSelectionSnapshot
+            ?? contextService.collectSelectionSnapshot(captureInsertionTarget: originalFieldInsertionEnabled)
         let scheduledManualCommandInvocation = pendingManualCommandInvocation
         cancelPendingShortcutStart()
         guard prepareRecordingStart(
             triggerMode: triggerMode,
-            selectionSnapshot: scheduledSelectionSnapshot,
+            selectionSnapshot: selectionSnapshot,
             manualCommandRequested: scheduledSelectionSnapshot == nil
                 ? hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
                 : scheduledManualCommandInvocation,
             startedAt: t0
         ) else { return }
-        guard ensureMicrophoneAccess() else { return }
+        guard ensureMicrophoneAccess(selectionSnapshot: selectionSnapshot) else { return }
         os_log(.info, log: recordingLog, "mic access check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
         applyAudioInterruptionIfNeeded()
         beginRecording(triggerMode: triggerMode)
         os_log(.info, log: recordingLog, "startRecording() finished: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
     }
 
+    /// Latches the supplied snapshot into the recording so later preference changes cannot redirect it.
     private func prepareRecordingStart(
         triggerMode: RecordingTriggerMode,
         selectionSnapshot: AppSelectionSnapshot? = nil,
         manualCommandRequested: Bool? = nil,
         startedAt: CFAbsoluteTime? = nil
     ) -> Bool {
+        textInsertionTargetID = nil
         activeRecordingTriggerMode = triggerMode
         let isAccessibilityTrusted = AXIsProcessTrusted()
         hasAccessibility = isAccessibilityTrusted
@@ -2066,6 +2166,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             errorMessage = "Accessibility permission required. Grant access in System Settings > Privacy & Security > Accessibility."
             statusText = "No Accessibility"
             activeRecordingTriggerMode = nil
+            activeTextInsertionTarget = nil
             currentSessionIntent = .dictation
             shortcutSessionController.reset()
             showAccessibilityAlert()
@@ -2075,7 +2176,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
             os_log(.info, log: recordingLog, "accessibility check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
         }
 
-        let selectionSnapshot = selectionSnapshot ?? contextService.collectSelectionSnapshot()
+        let selectionSnapshot = selectionSnapshot ?? contextService.collectSelectionSnapshot(captureInsertionTarget: originalFieldInsertionEnabled)
+        activeOriginalFieldInsertionEnabled = selectionSnapshot.usesOriginalFieldInsertion
+        activeTextInsertionTarget = activeOriginalFieldInsertionEnabled ? selectionSnapshot.textInsertionTarget : nil
+        textInsertionTargetID = activeTextInsertionTarget?.identifier
         let manualCommandRequested = manualCommandRequested
             ?? hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
         guard let resolvedIntent = resolveSessionIntent(
@@ -2089,7 +2193,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return true
     }
 
-    private func ensureMicrophoneAccess() -> Bool {
+    private func ensureMicrophoneAccess(selectionSnapshot: AppSelectionSnapshot) -> Bool {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
         case .authorized:
@@ -2101,7 +2205,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
             prepareForMicrophonePermissionPrompt(
                 triggerMode: triggerMode,
-                selectionSnapshot: pendingSelectionSnapshot ?? contextService.collectSelectionSnapshot(),
+                selectionSnapshot: selectionSnapshot,
                 manualCommandRequested: currentSessionIntent.isManualCommand
             )
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
@@ -2140,6 +2244,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         strongSelf.errorMessage = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone."
                         strongSelf.statusText = "No Microphone"
                         strongSelf.activeRecordingTriggerMode = nil
+                        strongSelf.activeTextInsertionTarget = nil
                         strongSelf.currentSessionIntent = .dictation
                         strongSelf.shortcutSessionController.reset()
                         strongSelf.showMicrophonePermissionAlert()
@@ -2151,6 +2256,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             errorMessage = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone."
             statusText = "No Microphone"
             activeRecordingTriggerMode = nil
+            activeTextInsertionTarget = nil
             currentSessionIntent = .dictation
             shortcutSessionController.reset()
             showMicrophonePermissionAlert()
@@ -2170,6 +2276,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         hotkeyManager.stop()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
         cancelRecordingInitializationTimer()
         audioRecorder.onRecordingReady = nil
         audioRecorder.onRecordingFailure = nil
@@ -2221,6 +2328,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         isRecording = true
         statusText = "Starting..."
+        // Keep this recording's display preference fixed, including during startup silence.
+        let showsRecordingTimer =
+            RecordingTimerPreference.load(from: .standard)
+
+        let timingGeneration = audioRecorder.prepareRecordingTiming()
 
         // Show initializing dots only if engine takes longer than 0.2s to start
         var overlayShown = false
@@ -2242,27 +2354,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         // Transition to waveform when first real audio arrives (any non-zero RMS)
         let deviceUID = selectedMicrophoneID
-        audioRecorder.onRecordingReady = { [weak self] in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.cancelRecordingInitializationTimer()
-                os_log(.info, log: recordingLog, "first real audio — transitioning to waveform")
-                self.statusText = "Recording..."
-                self.clearPendingOverlayDismissToken()
-                if overlayShown {
-                    self.overlayManager.transitionToRecording(
-                        mode: self.activeRecordingTriggerMode ?? triggerMode,
-                        isCommandMode: self.currentSessionIntent.isCommandMode
-                    )
-                } else {
-                    self.overlayManager.showRecording(
-                        mode: self.activeRecordingTriggerMode ?? triggerMode,
-                        isCommandMode: self.currentSessionIntent.isCommandMode
-                    )
-                }
-                overlayShown = true
-                self.playAlertSound(named: "Tink")
+        audioRecorder.onRecordingReady = { [weak self] captureStartedAt in
+            // The recorder already delivers on main after validating the generation.
+            // Do not enqueue again: cancellation could invalidate it between main-queue blocks.
+            guard let self, self.isRecording, self.activeRecordingTriggerMode != nil else { return }
+            self.cancelRecordingInitializationTimer()
+            os_log(.info, log: recordingLog, "first real audio — transitioning to waveform")
+            self.statusText = "Recording..."
+            self.clearPendingOverlayDismissToken()
+            if overlayShown {
+                self.overlayManager.transitionToRecording(
+                    mode: self.activeRecordingTriggerMode ?? triggerMode,
+                    isCommandMode: self.currentSessionIntent.isCommandMode,
+                    startedAt: captureStartedAt,
+                    showsRecordingTimer: showsRecordingTimer
+                )
+            } else {
+                self.overlayManager.showRecording(
+                    mode: self.activeRecordingTriggerMode ?? triggerMode,
+                    isCommandMode: self.currentSessionIntent.isCommandMode,
+                    startedAt: captureStartedAt,
+                    showsRecordingTimer: showsRecordingTimer
+                )
             }
+            overlayShown = true
+            self.playAlertSound(named: "Tink")
         }
         audioRecorder.onRecordingFailure = { [weak self] error in
             DispatchQueue.main.async {
@@ -2279,7 +2395,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard let self else { return }
             let t0 = CFAbsoluteTimeGetCurrent()
             do {
-                try self.audioRecorder.startRecording(deviceUID: deviceUID)
+                try self.audioRecorder.startRecording(deviceUID: deviceUID, timingGeneration: timingGeneration)
                 os_log(.info, log: recordingLog, "audioRecorder.startRecording() done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 DispatchQueue.main.async { [self] in
                     guard self.isRecording, self.activeRecordingTriggerMode != nil else { return }
@@ -2321,6 +2437,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.transcribingAudioFileName = nil
         }
         activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
         currentSessionIntent = .dictation
         shortcutSessionController.reset()
         endCriticalDictationActivity()
@@ -2348,55 +2465,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return "Failed to start recording: \(error.localizedDescription)"
     }
 
-    /// Turn a transcription failure into a concise, user-facing message,
-    /// classifying by the locale-independent `URLError.Code` rather than the
-    /// system's English description (which varies across releases and locales).
     private func formattedTranscriptionError(_ error: Error) -> String {
-        if let code = Self.urlErrorCode(in: error) {
-            switch code {
-            case .notConnectedToInternet, .networkConnectionLost,
-                 .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-                return "No internet — check connection"
-            case .timedOut:
-                return NetworkMonitor.shared.isOnline
-                    ? "Request timed out — try again"
-                    : "No internet — check connection"
-            default:
-                break
-            }
-        }
-
-        let lower = error.localizedDescription.lowercased()
-        if lower.contains("timed out") || lower.contains("timeout") {
-            return NetworkMonitor.shared.isOnline
-                ? "Request timed out — try again"
-                : "No internet — check connection"
-        }
-        if lower.contains("offline") || lower.contains("internet connection")
-            || lower.contains("not connected") || lower.contains("network")
-            || lower.contains("cannot find host") {
-            return "No internet — check connection"
-        }
-        return error.localizedDescription
-    }
-
-    /// Find a `URLError.Code` anywhere in the error's underlying-error chain,
-    /// so a wrapped transport error is still classified by its root cause.
-    private static func urlErrorCode(in error: Error) -> URLError.Code? {
-        var current: Error? = error
-        var depth = 0
-        while let err = current, depth < 8 {
-            if let urlError = err as? URLError {
-                return urlError.code
-            }
-            let nsError = err as NSError
-            if nsError.domain == NSURLErrorDomain {
-                return URLError.Code(rawValue: nsError.code)
-            }
-            current = nsError.userInfo[NSUnderlyingErrorKey] as? Error
-            depth += 1
-        }
-        return nil
+        TranscriptionErrorPresentationCore.message(
+            for: error,
+            isOnline: NetworkMonitor.shared.isOnline
+        )
     }
 
     func showMicrophonePermissionAlert() {
@@ -2547,6 +2620,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         customVocabulary: String,
         customSystemPrompt: String,
         outputLanguage: String = "",
+        dictationLanguage: String = "",
         preserveExactWording: Bool
     ) async -> (finalTranscript: String, outcome: TranscriptProcessingOutcome, prompt: String) {
         // Misheard vocabulary variants ("XField" for "Higgsfield") are fixed
@@ -2617,7 +2691,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 context: context,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
-                outputLanguage: outputLanguage
+                outputLanguage: outputLanguage,
+                dictationLanguage: dictationLanguage
             )
             let correctedTranscript = VocabularyEntries.applyingCorrections(
                 to: result.transcript,
@@ -2661,7 +2736,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         cancelPendingShortcutStart()
         cancelRecordingInitializationTimer()
         shortcutSessionController.reset()
+        let textInsertionTarget = activeTextInsertionTarget
+        let useOriginalFieldInsertion = activeOriginalFieldInsertionEnabled
+        activeOriginalFieldInsertionEnabled = false
         activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
         let sessionIntent = currentSessionIntent
         currentSessionIntent = .dictation
         audioRecorder.onRecordingReady = nil
@@ -2781,6 +2860,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         customVocabulary: self.customVocabulary,
                         customSystemPrompt: self.customSystemPrompt,
                         outputLanguage: self.outputLanguage,
+                        dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                         preserveExactWording: self.preserveExactWording
                     )
                     try Task.checkCancellation()
@@ -2839,7 +2919,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 self.overlayManager.dismiss()
                             }
                             if shouldPressEnterAfterPaste {
-                                self.pressEnterWhenShortcutReleased()
+                                if useOriginalFieldInsertion {
+                                    if let textInsertionTarget {
+                                        self.pressEnterWhenShortcutReleased(target: textInsertionTarget)
+                                    } else {
+                                        let status = "Original field unavailable — Enter skipped"
+                                        self.statusText = status
+                                        self.scheduleReadyStatusReset(after: 3, matching: [status])
+                                    }
+                                } else {
+                                    self.pressEnterWhenShortcutReleased()
+                                }
                             }
                         } else {
                             self.statusText = completionStatusText
@@ -2852,16 +2942,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 }
                             }
 
-                            let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
-                            self.pasteAtCursorWhenShortcutReleased {
-                                if shouldPressEnterAfterPaste {
-                                    self.pressEnterAfterPaste {
-                                        self.restoreClipboardIfNeeded(pendingClipboardRestore)
-                                    }
-                                } else {
-                                    self.restoreClipboardIfNeeded(pendingClipboardRestore)
-                                }
-                            }
+                            self.insertTranscriptWhenShortcutReleased(
+                                trimmedFinalTranscript, target: textInsertionTarget,
+                                shouldPressEnter: shouldPressEnterAfterPaste,
+                                useOriginalField: useOriginalFieldInsertion
+                            )
                         }
 
                         self.audioRecorder.cleanup()
@@ -3093,7 +3178,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func startDebugOverlay() {
         isDebugOverlayActive = true
         clearPendingOverlayDismissToken()
-        overlayManager.showRecording()
+        overlayManager.showRecording(
+            showsRecordingTimer:
+                RecordingTimerPreference.load(from: .standard)
+        )
 
         // Simulate audio levels with a timer
         var phase: Double = 0.0
@@ -3192,17 +3280,243 @@ final class AppState: ObservableObject, @unchecked Sendable {
         NotificationCenter.default.post(name: .showSettings, object: nil)
     }
 
-    private func pasteAtCursor() {
+    /// Delivers using the start-time mode and target; only definite non-insertion permits fallback paste.
+    /// Unconfirmed writes leave recovery to Paste Again instead of risking a duplicate.
+    private func insertTranscriptWhenShortcutReleased(
+        _ transcript: String, target: AppTextInsertionTarget?, shouldPressEnter: Bool, useOriginalField: Bool
+    ) {
+        guard useOriginalField else {
+            let pendingRestore = writeTranscriptToPasteboard(transcript)
+            pasteAtCursorWhenShortcutReleased {
+                if shouldPressEnter {
+                    self.pressEnterAfterPaste { self.restoreClipboardIfNeeded(pendingRestore) }
+                } else {
+                    self.restoreClipboardIfNeeded(pendingRestore)
+                }
+            }
+            return
+        }
+        performAfterShortcutReleased { [weak self] in
+            guard let self, target?.identifier == self.textInsertionTargetID else { return }
+            let finish: (String) -> Void = { [weak self] status in
+                self?.statusText = status
+                self?.scheduleReadyStatusReset(after: 3, matching: [status])
+            }
+            guard let target else {
+                finish("Original field unavailable — use Paste Again")
+                return
+            }
+            if target.isFocused {
+                var pendingRestore: PendingClipboardRestore?
+                let pasted: Bool
+                if !target.allowsTextCapture, target.isSupportedTextControl {
+                    if target.identifier == self.textInsertionTargetID, target.isFocused {
+                        pendingRestore = self.writeTranscriptToPasteboard(transcript)
+                        pasted = target.identifier == self.textInsertionTargetID && target.isFocused
+                        if pasted { self.pasteAtCursor(processIdentifier: target.processIdentifier) }
+                    } else {
+                        pasted = false
+                    }
+                } else {
+                    pasted = target.pasteIfUnchanged(
+                        restoringSelection: false,
+                        isCurrent: { target.identifier == self.textInsertionTargetID },
+                        preparePaste: { pendingRestore = self.writeTranscriptToPasteboard(transcript) },
+                        paste: { self.pasteAtCursor(processIdentifier: target.processIdentifier) }
+                    )
+                }
+                guard pasted else {
+                    self.restoreClipboardIfNeeded(pendingRestore)
+                    if target.identifier == self.textInsertionTargetID {
+                        finish("Original field changed or unavailable — use Paste Again")
+                    }
+                    return
+                }
+                finish(self.preserveClipboard ? "Pasted at cursor!" : "Copied to clipboard!")
+                if shouldPressEnter {
+                    self.pressEnterAfterPaste(target: target) { self.restoreClipboardIfNeeded(pendingRestore) }
+                } else {
+                    self.restoreClipboardIfNeeded(pendingRestore)
+                }
+                return
+            }
+            target.insert(
+                self.transcriptTextForInsertion(transcript),
+                isCurrent: { target.identifier == self.textInsertionTargetID }
+            ) { insertionResult in
+                guard target.identifier == self.textInsertionTargetID else { return }
+                switch insertionResult {
+                case .inserted:
+                    if !self.preserveClipboard || self.keepDictationInClipboardHistory {
+                        let pendingRestore = self.writeTranscriptToPasteboard(transcript)
+                        self.restoreClipboardIfNeeded(pendingRestore)
+                    }
+                    finish("Inserted in original field")
+                    if shouldPressEnter { self.pressEnterAfterPaste(target: target) }
+                case .notInserted:
+                    var pendingRestore: PendingClipboardRestore?
+                    self.performAtTarget(target, action: {
+                        target.pasteIfUnchanged(
+                            restoringSelection: true,
+                            isCurrent: { target.identifier == self.textInsertionTargetID },
+                            preparePaste: { pendingRestore = self.writeTranscriptToPasteboard(transcript) },
+                            paste: { self.pasteAtCursor(processIdentifier: target.processIdentifier) }
+                        )
+                    }) { pasted in
+                        guard pasted else {
+                            self.restoreClipboardIfNeeded(pendingRestore)
+                            if target.identifier == self.textInsertionTargetID {
+                                finish("Insertion unavailable — use Paste Again")
+                            }
+                            return
+                        }
+                        guard target.identifier == self.textInsertionTargetID else {
+                            self.restoreClipboardIfNeeded(pendingRestore)
+                            return
+                        }
+                        finish("Pasted in original field")
+                        if shouldPressEnter {
+                            self.pressEnterAfterPaste(target: target) { self.restoreClipboardIfNeeded(pendingRestore) }
+                        } else {
+                            self.restoreClipboardIfNeeded(pendingRestore)
+                        }
+                    }
+                case .unverified:
+                    // An uncertain AX write may already have inserted the text. Never paste it again.
+                    finish("Insertion unconfirmed — use Paste Again")
+                case .unavailable:
+                    finish("Original field changed or unavailable — use Paste Again")
+                }
+            }
+        }
+    }
+
+    /// Activates a current target only while input and destination focus still belong to this attempt.
+    /// A newer user action cancels both the delayed operation and any later focus restoration.
+    private func performAtTarget(
+        _ target: AppTextInsertionTarget, action: @escaping () -> Bool, completion: @escaping (Bool) -> Void
+    ) {
+        guard target.identifier == textInsertionTargetID,
+              let app = NSRunningApplication(processIdentifier: target.processIdentifier), !app.isTerminated else {
+            completion(false)
+            return
+        }
+        let inputBeforeActivation = Self.userInputEventCounts()
+        let targetAppElement = AXUIElementCreateApplication(target.processIdentifier)
+        let targetWindowBeforeActivation = accessibilityElement(
+            from: targetAppElement, attribute: kAXFocusedWindowAttribute as CFString
+        )
+        let targetFieldBeforeActivation = accessibilityElement(
+            from: targetAppElement, attribute: kAXFocusedUIElementAttribute as CFString
+        )
+        let previousApp = NSWorkspace.shared.frontmostApplication
+        let previousAppElement = previousApp.map { AXUIElementCreateApplication($0.processIdentifier) }
+        let previousWindow = previousAppElement.flatMap {
+            accessibilityElement(from: $0, attribute: kAXFocusedWindowAttribute as CFString)
+        }
+        let previousField = previousAppElement.flatMap {
+            accessibilityElement(from: $0, attribute: kAXFocusedUIElementAttribute as CFString)
+        }
+        let wasMinimized = target.isMinimized
+        if wasMinimized { target.setMinimized(false) }
+        guard target.identifier == textInsertionTargetID,
+              Self.userInputEventCounts() == inputBeforeActivation else {
+            completion(false)
+            return
+        }
+        app.activate(options: [.activateIgnoringOtherApps])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let windowNow = self.accessibilityElement(
+                from: targetAppElement, attribute: kAXFocusedWindowAttribute as CFString
+            )
+            let fieldNow = self.accessibilityElement(
+                from: targetAppElement, attribute: kAXFocusedUIElementAttribute as CFString
+            )
+            guard target.identifier == self.textInsertionTargetID,
+                  Self.userInputEventCounts() == inputBeforeActivation,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
+                  windowNow != nil,
+                  (self.sameAccessibilityElement(windowNow, target.window)
+                    || self.sameAccessibilityElement(windowNow, targetWindowBeforeActivation)),
+                  (self.sameAccessibilityElement(fieldNow, target.element)
+                    || self.sameAccessibilityElement(fieldNow, targetFieldBeforeActivation)) else {
+                completion(false)
+                return
+            }
+            guard target.focus(),
+                  target.identifier == self.textInsertionTargetID,
+                  Self.userInputEventCounts() == inputBeforeActivation,
+                  target.isFocused,
+                  (target.window == nil || self.sameAccessibilityElement(
+                    self.accessibilityElement(from: targetAppElement, attribute: kAXFocusedWindowAttribute as CFString),
+                    target.window
+                  )) else {
+                completion(false)
+                return
+            }
+            let performed = action()
+            let focusedElementAfterAttempt = self.accessibilityElement(
+                from: targetAppElement, attribute: kAXFocusedUIElementAttribute as CFString
+            )
+            let focusedWindowAfterAttempt = self.accessibilityElement(
+                from: targetAppElement, attribute: kAXFocusedWindowAttribute as CFString
+            )
+            completion(performed)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard target.identifier == self.textInsertionTargetID,
+                      Self.userInputEventCounts() == inputBeforeActivation,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
+                      let focusedElementAfterAttempt, let focusedWindowAfterAttempt,
+                      self.sameAccessibilityElement(
+                        self.accessibilityElement(from: targetAppElement, attribute: kAXFocusedUIElementAttribute as CFString),
+                        focusedElementAfterAttempt
+                      ),
+                      self.sameAccessibilityElement(
+                        self.accessibilityElement(from: targetAppElement, attribute: kAXFocusedWindowAttribute as CFString),
+                        focusedWindowAfterAttempt
+                      ) else { return }
+                if wasMinimized { target.setMinimized(true) }
+                if let previousWindow { AXUIElementPerformAction(previousWindow, kAXRaiseAction as CFString) }
+                if let previousField {
+                    AXUIElementSetAttributeValue(previousField, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                }
+                if previousApp?.processIdentifier != target.processIdentifier { previousApp?.activate() }
+            }
+        }
+    }
+
+    /// Compares AX identity, including a retained nil focus while a background editor is blurred.
+    private func sameAccessibilityElement(_ first: AXUIElement?, _ second: AXUIElement?) -> Bool {
+        guard let first, let second else { return first == nil && second == nil }
+        return CFEqual(first, second)
+    }
+
+    /// Samples only hardware-event counters; no event contents, monitor, or persistent state is collected.
+    private static func userInputEventCounts() -> [UInt32] {
+        let types: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown, .flagsChanged, .scrollWheel]
+        return types.map { CGEventSource.counterForEventType(.hidSystemState, eventType: $0) }
+    }
+
+    /// Posts Cmd-V to a PID, or globally when nil; this sender does not validate field identity.
+    private func pasteAtCursor(processIdentifier: pid_t? = nil) {
         let source = CGEventSource(stateID: .hidSystemState)
         let vKeyCode = keyCodeForCharacter("v") ?? 9
 
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: true)
         keyDown?.flags = .maskCommand
-        keyDown?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            keyDown?.postToPid(processIdentifier)
+        } else {
+            keyDown?.post(tap: .cgSessionEventTap)
+        }
 
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: false)
         keyUp?.flags = .maskCommand
-        keyUp?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            keyUp?.postToPid(processIdentifier)
+        } else {
+            keyUp?.post(tap: .cgSessionEventTap)
+        }
     }
 
     private func keyCodeForCharacter(_ character: String) -> CGKeyCode? {
@@ -3233,14 +3547,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func pressEnter() {
+    /// Posts Return to a PID, or globally when nil; targeted callers must authorize the field/session.
+    private func pressEnter(processIdentifier: pid_t? = nil) {
         let source = CGEventSource(stateID: .hidSystemState)
 
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true)
-        keyDown?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            keyDown?.postToPid(processIdentifier)
+        } else {
+            keyDown?.post(tap: .cgSessionEventTap)
+        }
 
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false)
-        keyUp?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            keyUp?.postToPid(processIdentifier)
+        } else {
+            keyUp?.post(tap: .cgSessionEventTap)
+        }
+    }
+
+    /// Keeps trailing-space behavior identical for clipboard paste and Accessibility insertion.
+    private func transcriptTextForInsertion(_ transcript: String) -> String {
+        guard let last = transcript.last, ".!?".contains(last) else { return transcript }
+        return transcript + " "
     }
 
     /// Writes the final transcript to the system pasteboard.
@@ -3254,12 +3583,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         // Append a space when ending with sentence-ending punctuation so the
         // next dictation does not jam against the prior period.
-        let textToWrite: String
-        if let last = transcript.last, ".!?".contains(last) {
-            textToWrite = transcript + " "
-        } else {
-            textToWrite = transcript
-        }
+        let textToWrite = transcriptTextForInsertion(transcript)
 
         if keepDictationInClipboardHistory {
             // Plain write so clipboard managers record the dictation in history.
@@ -3345,16 +3669,78 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func pressEnterWhenShortcutReleased(completion: (() -> Void)? = nil) {
+    /// Waits for shortcut release; targeted Enter revalidates its destination at dispatch time.
+    private func pressEnterWhenShortcutReleased(
+        target: AppTextInsertionTarget? = nil, completion: (() -> Void)? = nil
+    ) {
         performAfterShortcutReleased { [weak self] in
-            self?.pressEnter()
-            completion?()
+            if let target {
+                self?.pressEnterAtTarget(target, completion: completion)
+            } else {
+                self?.pressEnter()
+                completion?()
+            }
         }
     }
 
-    private func pressEnterAfterPaste(completion: (() -> Void)? = nil) {
+    /// Allows paste consumption; a newer interaction cancels targeted Enter during this delay.
+    private func pressEnterAfterPaste(target: AppTextInsertionTarget? = nil, completion: (() -> Void)? = nil) {
+        let inputBeforeDelay = target.map { _ in Self.userInputEventCounts() }
+        let appBeforeDelay = NSWorkspace.shared.frontmostApplication?.processIdentifier
         DispatchQueue.main.asyncAfter(deadline: .now() + pressEnterAfterPasteDelay) { [weak self] in
-            self?.pressEnter()
+            if let target {
+                guard Self.userInputEventCounts() == inputBeforeDelay,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == appBeforeDelay else {
+                    if let self, target.identifier == self.textInsertionTargetID {
+                        let status = "Original field is not focused — Enter skipped"
+                        self.statusText = status
+                        self.scheduleReadyStatusReset(after: 3, matching: [status])
+                    }
+                    completion?()
+                    return
+                }
+                self?.pressEnterAtTarget(target, completion: completion)
+            } else {
+                self?.pressEnter()
+                completion?()
+            }
+        }
+    }
+
+    /// Sends Enter only for the current target; foreground text controls need no full-field capture.
+    /// Refocusing is reserved for capture-eligible background targets; other failures skip Enter.
+    private func pressEnterAtTarget(_ target: AppTextInsertionTarget, completion: (() -> Void)?) {
+        guard target.identifier == textInsertionTargetID else {
+            completion?()
+            return
+        }
+        if target.canSendEnter || (target.isFocused && target.isSupportedTextControl) {
+            pressEnter(processIdentifier: target.processIdentifier)
+            completion?()
+            return
+        }
+        guard target.allowsTextCapture,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier != target.processIdentifier else {
+            let status = "Original field is not focused — Enter skipped"
+            statusText = status
+            scheduleReadyStatusReset(after: 3, matching: [status])
+            completion?()
+            return
+        }
+
+        performAtTarget(target, action: { [weak self] in
+            guard let self,
+                  target.identifier == self.textInsertionTargetID,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
+                  target.canSendEnter else { return false }
+            self.pressEnter(processIdentifier: target.processIdentifier)
+            return true
+        }) { [weak self] sent in
+            if !sent, let self, target.identifier == self.textInsertionTargetID {
+                let status = "Original field is not focused — Enter skipped"
+                self.statusText = status
+                self.scheduleReadyStatusReset(after: 3, matching: [status])
+            }
             completion?()
         }
     }

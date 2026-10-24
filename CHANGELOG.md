@@ -30,6 +30,27 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 ### Removed
 
 - The Screen Recording permission and all screenshot capture; app context comes from Accessibility only.
+- The upstream 1.3.0 full-desktop screenshot fallback setting is not merged.
+
+## [1.3.1] - 2026-10-09
+
+### Fixed
+
+- The recording timer is now off by default. You can enable it in Settings; existing saved choices are preserved.
+
+## [1.3.0] - 2026-10-09
+
+### Added
+
+- An optional elapsed recording timer in the dictation overlay.
+- A setting to disable full-desktop screenshots when active-window capture is unavailable.
+
+### Improved
+
+- Context and fallback models now use Qwen 3.8 on Groq. Existing Groq Qwen 3.6 selections update automatically, while custom provider choices are preserved.
+- Context failures now show clear model, authentication, rate-limit, timeout, and response errors in run logs. Failed summaries are omitted from transcript cleanup and Edit Mode, including when retrying older entries.
+- Network failures provide clearer guidance when a VPN or proxy may be interrupting transcription.
+- Compatibility with newer Swift toolchains and reliability checks for dictation and releases.
 
 ## [1.2.1] - 2026-08-11
 

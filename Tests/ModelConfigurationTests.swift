@@ -6,6 +6,7 @@ enum ModelConfigurationTests {
         testKnownModelSettingsRemainStable()
         testModelListsAreConsistent()
         testThinkTagStripping()
+        testGroqSelectionMigration()
     }
 
     private static func testProviderlessAliasesMatchCanonicalModels() {
@@ -13,7 +14,7 @@ enum ModelConfigurationTests {
         assertSameConfig("gpt-oss-120b", "openai/gpt-oss-120b")
         assertSameConfig("gpt-oss-safeguard-20b", "openai/gpt-oss-safeguard-20b")
         assertSameConfig("qwen3-32b", "qwen/qwen3-32b")
-        assertSameConfig(" QWEN3.6-27B ", "qwen/qwen3.6-27b")
+        assertSameConfig(" QWEN3.8-27B ", "qwen/qwen3.8-27b")
     }
 
     private static func testKnownModelSettingsRemainStable() {
@@ -23,7 +24,7 @@ enum ModelConfigurationTests {
         TestSupport.expectEqual(gptOSS.includeReasoning, false)
         TestSupport.expectEqual(gptOSS.shouldStripThinkTags, false)
 
-        let qwen = ModelConfiguration.config(for: "qwen/qwen3.6-27b")
+        let qwen = ModelConfiguration.config(for: "qwen/qwen3.8-27b")
         TestSupport.expectEqual(qwen.reasoningEffort, "none")
         TestSupport.expectEqual(qwen.includeReasoning, false)
         TestSupport.expectEqual(qwen.shouldStripThinkTags, true)
@@ -59,6 +60,34 @@ enum ModelConfigurationTests {
             ModelConfiguration.stripThinkTags("Ordinary output with a later <think> marker"),
             "Ordinary output with a later <think> marker"
         )
+    }
+
+    private static func testGroqSelectionMigration() {
+        let suite = "FreeFlowTests.ModelMigration.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keys = ["context_model", "post_processing_model", "post_processing_fallback_model"]
+        for key in keys {
+            for stored in ["qwen/qwen3.6-27b", " QWEN3.6-27B "] {
+                defaults.set(stored, forKey: key)
+                ModelConfiguration.migrateGroqSelection(key: key, baseURL: "https://api.groq.com/openai/v1/", defaults: defaults)
+                TestSupport.expectEqual(defaults.string(forKey: key), "qwen/qwen3.8-27b")
+                ModelConfiguration.migrateGroqSelection(key: key, baseURL: "https://api.groq.com/openai/v1", defaults: defaults)
+                TestSupport.expectEqual(defaults.string(forKey: key), "qwen/qwen3.8-27b")
+            }
+            for provider in ["https://openrouter.ai/api/v1", "https://example.invalid/openai/v1", "https://api.groq.com/custom"] {
+                defaults.set("qwen/qwen3.6-27b", forKey: key)
+                ModelConfiguration.migrateGroqSelection(key: key, baseURL: provider, defaults: defaults)
+                TestSupport.expectEqual(defaults.string(forKey: key), "qwen/qwen3.6-27b")
+            }
+            defaults.set("custom/synthetic", forKey: key)
+            ModelConfiguration.migrateGroqSelection(key: key, baseURL: "https://api.groq.com/openai/v1", defaults: defaults)
+            TestSupport.expectEqual(defaults.string(forKey: key), "custom/synthetic")
+            defaults.removeObject(forKey: key)
+            ModelConfiguration.migrateGroqSelection(key: key, baseURL: "https://api.groq.com/openai/v1", defaults: defaults)
+            TestSupport.expect(defaults.object(forKey: key) == nil, "Migration should not populate missing preferences")
+        }
+        assertSameConfig("qwen3.6-27b", "qwen/qwen3.6-27b")
     }
 
     private static func assertSameConfig(_ alias: String, _ canonical: String) {

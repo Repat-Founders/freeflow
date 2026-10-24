@@ -90,6 +90,7 @@ update, `git pull` and run `make run` again.
 
 - **One dictation shortcut:** Hold to talk, or double-tap for hands-free dictation. A lone tap is ignored.
 - **Context-aware cleanup:** FreeFlow reads the frontmost app's name, window title and selected text through Accessibility, so formatting and spelling fit email, terminals, docs and chat. No Screen Recording permission, no screenshots.
+- **Original-field insertion (opt in):** Enable **Insert into the original field** in Settings → General → Text insertion to keep dictation tied to its starting field when switching windows. This is off by default and applies to new dictations; otherwise dictation pastes into the currently focused field. Changed or unavailable fields and unconfirmed writes leave the transcript available through Paste Again rather than risking a misplaced or duplicate paste. Paste fallback, or Enter when an editor loses background focus, may briefly activate the original app before restoring your previous focus.
 - **Readable output:** Long dictations are split into paragraphs at changes of idea; spoken enumerations become lists; reported speech is quoted.
 - **Custom vocabulary:** Add names, jargon, and project-specific words that FreeFlow should preserve during cleanup. When speech recognition keeps mishearing a term, list the misheard forms in parentheses — `Higgsfield (XField, X Field)` — and FreeFlow replaces them.
 - **Add to Vocabulary shortcut:** Select a word anywhere, press the shortcut, confirm with Return.
@@ -163,6 +164,10 @@ defaults delete com.zachlatta.freeflow context_request_timeout_seconds
 ```
 
 </details>
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to set up the project, build, test, and submit changes.
 
 ## License
 

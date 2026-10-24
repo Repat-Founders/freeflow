@@ -65,9 +65,7 @@ struct ProviderSettingsFields: View {
 
     private func commitAPIBaseURL() {
         let trimmed = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedBaseURL = trimmed.isEmpty ? AppState.defaultAPIBaseURL : trimmed
-        apiBaseURLInput = resolvedBaseURL
-        appState.apiBaseURL = resolvedBaseURL
+        apiBaseURLInput = trimmed.isEmpty ? AppState.defaultAPIBaseURL : trimmed
     }
 
     private func commitTranscriptionModel() {
@@ -137,17 +135,11 @@ struct ProviderSettingsFields: View {
     }
 
     private func commitTranscriptionAPIURL() {
-        let trimmed = transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        transcriptionAPIURLInput = trimmed
-        guard appState.transcriptionAPIURL != trimmed else { return }
-        appState.transcriptionAPIURL = trimmed
+        transcriptionAPIURLInput = transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func commitTranscriptionAPIKey() {
-        let trimmed = transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        transcriptionAPIKeyInput = trimmed
-        guard appState.transcriptionAPIKey != trimmed else { return }
-        appState.transcriptionAPIKey = trimmed
+        transcriptionAPIKeyInput = transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -175,7 +167,6 @@ struct ProviderSettingsFields: View {
 
                 Button("Reset to Default") {
                     apiBaseURLInput = AppState.defaultAPIBaseURL
-                    appState.apiBaseURL = AppState.defaultAPIBaseURL
                 }
                 .font(.caption)
             }
@@ -296,7 +287,6 @@ struct ProviderSettingsFields: View {
                     if !transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button("Clear") {
                             transcriptionAPIURLInput = ""
-                            appState.transcriptionAPIURL = ""
                         }
                         .font(.caption)
                     }
@@ -322,7 +312,6 @@ struct ProviderSettingsFields: View {
                     if !transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button("Clear") {
                             transcriptionAPIKeyInput = ""
-                            appState.transcriptionAPIKey = ""
                         }
                         .font(.caption)
                     }
@@ -534,15 +523,13 @@ struct GeneralSettingsView: View {
     @AppStorage("show_menu_bar_icon") private var showMenuBarIcon = true
     @AppStorage("overlay_display_id") private var overlayDisplayID = 0
     @AppStorage("use_compact_overlay") private var useCompactOverlay = true
+    @AppStorage(RecordingTimerPreference.storageKey) private var showRecordingTimer = RecordingTimerPreference.defaultEnabled
     @State private var screensVersion = 0
-    @State private var apiKeyInput: String = ""
-    @State private var apiBaseURLInput: String = ""
-    @State private var transcriptionAPIURLInput: String = ""
-    @State private var transcriptionAPIKeyInput: String = ""
+    @State private var apiDraft = APIConfigurationDraft()
     @State private var advancedProviderSettingsExpanded = false
     @State private var isValidatingKey = false
     @State private var keyValidationError: String?
-    @State private var keyValidationSuccess = false
+    @State private var successfulAPIConfiguration: ValidatedAPIConfiguration?
     @State private var customVocabularyInput: String = ""
     @FocusState private var customVocabularyFocused: Bool
     @State private var micPermissionGranted = false
@@ -735,6 +722,9 @@ struct GeneralSettingsView: View {
                 SettingsCard("Cleanup", icon: "sparkles") {
                     cleanupSection
                 }
+                SettingsCard("Text insertion", icon: "text.cursor") {
+                    textInsertionSection
+                }
                 SettingsCard("Clipboard", icon: "doc.on.clipboard") {
                     clipboardSection
                 }
@@ -757,26 +747,30 @@ struct GeneralSettingsView: View {
             .padding(24)
         }
         .onAppear {
-            apiKeyInput = appState.apiKey
-            apiBaseURLInput = appState.apiBaseURL
-            transcriptionAPIURLInput = appState.transcriptionAPIURL
-            transcriptionAPIKeyInput = appState.transcriptionAPIKey
+            apiDraft.present(appState.committedAPIConfiguration)
+            isValidatingKey = false
+            keyValidationError = nil
+            successfulAPIConfiguration = nil
             customVocabularyInput = appState.customVocabulary
             checkMicPermission()
             appState.refreshLaunchAtLoginStatus()
             Task { await githubCache.fetchIfNeeded() }
         }
         .onDisappear {
+            apiDraft.dismiss()
             commitCustomVocabulary()
         }
-        .onChange(of: appState.transcriptionAPIURL) { value in
-            if transcriptionAPIURLInput != value {
-                transcriptionAPIURLInput = value
+        .onChange(of: appState.committedAPIConfiguration) { saved in
+            apiDraft.reconcile(saved)
+            keyValidationError = nil
+            if successfulAPIConfiguration != saved {
+                successfulAPIConfiguration = nil
             }
         }
-        .onChange(of: appState.transcriptionAPIKey) { value in
-            if transcriptionAPIKeyInput != value {
-                transcriptionAPIKeyInput = value
+        .onChange(of: apiDraft.configuration) { value in
+            keyValidationError = nil
+            if successfulAPIConfiguration != value {
+                successfulAPIConfiguration = nil
             }
         }
     }
@@ -982,26 +976,22 @@ struct GeneralSettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                SecureField("Enter your Groq API key", text: $apiKeyInput)
+                SecureField("Enter your Groq API key", text: $apiDraft.apiKey)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
                     .disabled(isValidatingKey)
-                    .onChange(of: apiKeyInput) { _ in
-                        keyValidationError = nil
-                        keyValidationSuccess = false
-                    }
 
                 Button(isValidatingKey ? "Validating..." : "Save") {
                     validateAndSaveKey()
                 }
-                .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isValidatingKey)
+                .disabled(apiDraft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isValidatingKey)
             }
 
             if let error = keyValidationError {
                 Label(error, systemImage: "xmark.circle.fill")
                     .foregroundStyle(.red)
                     .font(.caption)
-            } else if keyValidationSuccess {
+            } else if apiDraft.showsSavedSuccess(successfulAPIConfiguration, committed: appState.committedAPIConfiguration) {
                 Label("API key saved", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.caption)
@@ -1011,9 +1001,9 @@ struct GeneralSettingsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Divider()
                     ProviderSettingsFields(
-                        apiBaseURLInput: $apiBaseURLInput,
-                        transcriptionAPIURLInput: $transcriptionAPIURLInput,
-                        transcriptionAPIKeyInput: $transcriptionAPIKeyInput,
+                        apiBaseURLInput: $apiDraft.baseURL,
+                        transcriptionAPIURLInput: $apiDraft.transcriptionAPIURL,
+                        transcriptionAPIKeyInput: $apiDraft.transcriptionAPIKey,
                         showsModelDescription: false
                     )
                 }
@@ -1032,25 +1022,37 @@ struct GeneralSettingsView: View {
     }
 
     private func validateAndSaveKey() {
-        let key = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let baseURL = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isValidatingKey else { return }
+        let submission = apiDraft.submission
         isValidatingKey = true
         keyValidationError = nil
-        keyValidationSuccess = false
+        successfulAPIConfiguration = nil
 
-        Task {
-            let valid = await TranscriptionService.validateAPIKey(
-                key,
-                baseURL: baseURL.isEmpty ? AppState.defaultAPIBaseURL : baseURL
-            )
-            await MainActor.run {
-                isValidatingKey = false
-                if valid {
-                    appState.apiKey = key
-                    keyValidationSuccess = true
-                } else {
-                    keyValidationError = "Validation failed. Please check your API key and provider settings, then try again."
+        Task { @MainActor in
+            var accepted: ValidatedAPIConfiguration?
+            let valid = await APIConfigurationSaveFlow.validateAndApply(
+                apiKey: submission.configuration.apiKey,
+                baseURL: submission.configuration.baseURL,
+                transcriptionAPIURL: submission.configuration.transcriptionAPIURL,
+                transcriptionAPIKey: submission.configuration.transcriptionAPIKey
+            ) { configuration in
+                if apiDraft.accept(configuration, for: submission) {
+                    accepted = configuration
                 }
+                appState.updateAPIConfiguration(
+                    apiKey: configuration.apiKey,
+                    baseURL: configuration.baseURL,
+                    transcriptionAPIURL: configuration.transcriptionAPIURL,
+                    transcriptionAPIKey: configuration.transcriptionAPIKey
+                )
+            }
+            guard apiDraft.isCurrent(submission) else { return }
+            isValidatingKey = false
+            if valid, let accepted, apiDraft.configuration == accepted,
+               appState.committedAPIConfiguration == accepted {
+                successfulAPIConfiguration = accepted
+            } else if !valid && apiDraft.matches(submission) {
+                keyValidationError = "Validation failed. Please check your API key and provider settings, then try again."
             }
         }
     }
@@ -1139,6 +1141,11 @@ struct GeneralSettingsView: View {
                 isMinimalist: false,
                 selection: $useCompactOverlay
             )
+
+            Toggle("Show recording timer", isOn: $showRecordingTimer)
+            Text("When off, the minimalist overlay shows a waveform instead of the timer, and the drop-down pill hides the timer. Applies to the next recording.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Divider()
 
@@ -1278,6 +1285,27 @@ struct GeneralSettingsView: View {
         }
     }
 
+    // MARK: Text insertion
+
+    private var textInsertionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle("Insert into the original field", isOn: $appState.originalFieldInsertionEnabled)
+
+            Text("Keep dictation in the field where recording began, even after switching apps. Off by default; applies to new dictations. Pasting or pressing Return may briefly bring the original app forward, then restore your previous focus when possible.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+                .padding(.vertical, 2)
+
+            Toggle("Say \"press enter\" to submit after paste", isOn: $appState.isPressEnterVoiceCommandEnabled)
+
+            Text("When the transcription ends with \"press enter\", \(AppName.displayName) removes those words before cleanup, pastes the remaining transcript, then presses Return.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: Clipboard
 
     private var clipboardSection: some View {
@@ -1294,15 +1322,6 @@ struct GeneralSettingsView: View {
             Toggle("Keep dictations in clipboard history", isOn: $appState.keepDictationInClipboardHistory)
 
             Text("When on, your clipboard manager (Paste, Raycast, Maccy, etc.) records each dictation so you can find it in your recent history. When off, \(AppName.displayName) marks dictations transient and your clipboard manager skips them.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
-                .padding(.vertical, 2)
-
-            Toggle("Say \"press enter\" to submit after paste", isOn: $appState.isPressEnterVoiceCommandEnabled)
-
-            Text("When the transcription ends with \"press enter\", \(AppName.displayName) removes those words before cleanup, pastes the remaining transcript, then presses Return.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1986,7 +2005,7 @@ struct PromptsSettingsView: View {
                     contextTestOutput = context.contextSummary
                     contextTestPrompt = prompt
                 } else {
-                    contextTestError = "Context inference returned no result. This may be a permissions issue or the API could not be reached."
+                    contextTestError = context.contextSummary
                     contextTestOutput = context.contextSummary
                 }
                 contextTestRunning = false
@@ -2262,10 +2281,23 @@ struct RunLogEntryView: View {
                                     }
 
                                     if !item.contextSummary.isEmpty {
-                                        Text(item.contextSummary)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
+                                        if ContextInferenceFailure.isFailureSummary(item.contextSummary) {
+                                            Label("Context summary failed", systemImage: "exclamationmark.triangle.fill")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.orange)
+                                            Text(item.contextSummary)
+                                                .font(.caption)
+                                                .foregroundStyle(.orange)
+                                                .textSelection(.enabled)
+                                            Text("No usable activity summary. Dictation can continue.")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Text(item.contextSummary)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .textSelection(.enabled)
+                                        }
                                     } else {
                                         Text("No context captured")
                                             .font(.caption)

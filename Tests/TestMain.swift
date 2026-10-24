@@ -2,14 +2,25 @@ import Foundation
 
 @main
 struct FreeFlowTests {
-    static func main() {
+    static func main() async {
         AppContextServiceTests.run()
+        await LLMAPITransportTests.run()
+        TemperatureCapabilityCacheTests.run()
         ModelConfigurationTests.run()
+        RecordingCaptureTimingTests.run()
+        RecordingTimerPreferenceTests.run()
+        OriginalFieldInsertionPreferenceTests.run()
         ShortcutCoreTests.run()
         SemanticVersionTests.run()
         LLMCooldownManagerTests.run()
+        PostProcessingServiceTests.run()
+        TranscriptionErrorPresentationCoreTests.run()
         TranscriptTextCoreTests.run()
         VocabularyEntriesTests.run()
+        AppTextInsertionCoreTests.run()
+        AppTextInsertionDispatchTests.run()
+        await TranscriptionServiceTests.run()
+        await APIConfigurationDraftTests.run()
         print("FreeFlowTests passed")
     }
 }
