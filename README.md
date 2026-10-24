@@ -64,9 +64,10 @@ cd freeflow
 make run
 ```
 
-This produces `build/FreeFlow Dev.app` and opens it. To keep it, copy it to
-`/Applications`. When rebuilding, quit the running app first: `make run` does
-not restart an app that is already open.
+This produces `build/FreeFlow Dev.app` and opens it. `make install` builds,
+quits the running copy, replaces `/Applications/FreeFlow Dev.app` and relaunches
+it. To sign with another certificate without passing it every time, put
+`CODESIGN_IDENTITY = <name>` in an untracked `Makefile.local`.
 
 **3. Set it up.** The first launch walks you through it:
 
@@ -76,9 +77,9 @@ not restart an app that is already open.
   Accessibility). It is what lets FreeFlow paste text and read the frontmost
   app's context.
 
-**Updates.** A source build never checks for updates on its own. Do not use
-**Check for Updates**: it would replace this fork with the upstream app. To
-update, `git pull` and run `make run` again.
+**Updates.** A source build never checks for updates, and the fork has no
+Check for Updates entry: the upstream release would replace it. To update,
+`git pull` and run `make install`.
 
 ## Quick Start
 

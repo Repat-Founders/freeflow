@@ -94,6 +94,23 @@ filler-only clarification is folded into the fork prompt, and its dictation-lang
 directive stays a no-op while Transcription Language is on Auto-detect. Rejected:
 the full-desktop screenshot fallback setting (b7d6cbd), which is screen capture.
 
+Target app and dashes (outside the brief, done):
+
+- `TargetApplication` maps known bundle ids to a formatting rule sent as
+  `TARGET_APP:` in the user message, next to the transcript, where
+  gpt-oss-20b actually follows it. Conductor, Claude and ChatGPT count as
+  agent prompts: spoken slash commands, paths, `_` and `@` are written as
+  typed. Unknown apps, browsers included, keep the context inference.
+- `TranscriptOutputSanitizer.removingDashes` rewrites em and en dashes the
+  model adds anyway: a comma, a hyphen between numbers, `- ` at a line start.
+- Measured against Groq on 2026-10-24: gpt-oss-20b stays the default. 120b
+  fixed one self-correction more but broke a branch name and was twice as
+  slow. On the free plan the long system prompt hits the tokens-per-minute
+  limit after about three dictations within a minute.
+- The update UI is gone (menu entry and Settings card): the only update
+  source is upstream, which would replace the fork. The menu bar has a Copy
+  Raw Transcript entry when cleanup changed the last dictation.
+
 ## Do not modify
 
 - `Sources/GlobalShortcutBackend.swift`
@@ -132,6 +149,7 @@ prompt's own NEVER TRANSLATE rule.
 ```bash
 make          # build build/FreeFlow Dev.app
 make run      # build and launch
+make install  # build, quit the running app, replace it in /Applications, relaunch
 make check    # typecheck + tests + plist/shell/YAML validation — must pass before every commit
 git diff --check
 ```
@@ -140,7 +158,8 @@ git diff --check
 and runs the deterministic tests, and lints plists, shell scripts and YAML.
 
 Codesign identity is a self-signed certificate named "FreeFlow Dev";
-`CODESIGN_IDENTITY` in the Makefile depends on it. The identity plus the fixed
+`CODESIGN_IDENTITY` in the Makefile depends on it. An untracked
+`Makefile.local` can override it (`CODESIGN_IDENTITY = <name>`). The identity plus the fixed
 bundle id keep the Accessibility grant alive across rebuilds — change either and
 macOS silently revokes it, breaking paste injection.
 

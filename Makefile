@@ -1,3 +1,5 @@
+-include Makefile.local
+
 APP_NAME ?= FreeFlow Dev
 BUNDLE_ID ?= com.zachlatta.freeflow.dev
 BUILD_DIR = build
@@ -54,7 +56,7 @@ ICON_SOURCE = Resources/AppIcon-Source.png
 ICON_ICNS = Resources/AppIcon.icns
 endif
 
-.PHONY: all check clean run icon dmg codesign-dmg notarize test typecheck validate
+.PHONY: all check clean run install icon dmg codesign-dmg notarize test typecheck validate
 
 all: $(APP_EXECUTABLE_TARGET)
 
@@ -186,3 +188,11 @@ clean:
 
 run: all
 	open "$(APP_BUNDLE)"
+
+install: all
+	@osascript -e 'quit app "$(APP_NAME)"' 2>/dev/null || true
+	@while pgrep -xq "$(APP_NAME)"; do sleep 0.2; done
+	@rm -rf "/Applications/$(APP_NAME).app"
+	@cp -R "$(APP_BUNDLE)" /Applications/
+	@open "/Applications/$(APP_NAME).app"
+	@echo "Installed /Applications/$(APP_NAME).app"
