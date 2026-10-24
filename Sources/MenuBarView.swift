@@ -11,6 +11,14 @@ struct MenuBarView: View {
         Array(appState.pipelineHistory.filter { !transcriptText(for: $0).isEmpty }.prefix(10))
     }
 
+    private var latestRawTranscript: String? {
+        guard let rawTranscript = appState.pipelineHistory.first?.rawTranscript
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !rawTranscript.isEmpty,
+            rawTranscript != appState.lastTranscript else { return nil }
+        return rawTranscript
+    }
+
     private func transcriptText(for item: PipelineHistoryItem) -> String {
         let cleaned = item.postProcessedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleaned.isEmpty {
@@ -125,6 +133,12 @@ struct MenuBarView: View {
                     ? "Paste Again"
                     : "Paste Again  (\(appState.copyAgainShortcut.displayName))") {
                     appState.copyLastTranscriptToPasteboard()
+                }
+
+                if let rawTranscript = latestRawTranscript {
+                    Button("Copy Raw Transcript") {
+                        copyTranscriptToPasteboard(rawTranscript)
+                    }
                 }
 
                 let truncatedTranscript = appState.lastTranscript.count > 35
