@@ -8,6 +8,9 @@ enum PostProcessingServiceTests {
         testCustomPromptKeepsDirective()
         testFallbackModelReceivesSameDirective()
         testEnglishRequestIsUnchanged()
+        testKnownTargetApplicationIsNamedInUserMessage()
+        testUnknownTargetApplicationAddsNothing()
+        testUserMessageForbidsDashes()
     }
 
     private static let directive = "The dictation is primarily in Russian"
@@ -82,11 +85,30 @@ enum PostProcessingServiceTests {
         TestSupport.expectEqual(requests.map(\.systemPrompt), [PostProcessingService.defaultSystemPrompt])
     }
 
+    private static func testKnownTargetApplicationIsNamedInUserMessage() {
+        let requests = cleanupRequests(dictationLanguage: "", bundleIdentifier: "com.conductor.app") { _ in "Synthetic cleaned text." }
+        TestSupport.expect(
+            requests[0].userMessage.contains("TARGET_APP: \(TargetApplication.agentPrompt.instruction)"),
+            "Known app must be named in the user message"
+        )
+    }
+
+    private static func testUnknownTargetApplicationAddsNothing() {
+        let requests = cleanupRequests(dictationLanguage: "", bundleIdentifier: "com.google.Chrome") { _ in "Synthetic cleaned text." }
+        TestSupport.expect(!requests[0].userMessage.contains("TARGET_APP:"), "Unknown app must be left to context inference")
+    }
+
+    private static func testUserMessageForbidsDashes() {
+        let requests = cleanupRequests(dictationLanguage: "") { _ in "Synthetic cleaned text." }
+        TestSupport.expect(requests[0].userMessage.contains("Never use em dashes"), "Dash rule must sit next to the transcript")
+    }
+
     // MARK: - Request capture
 
     private struct CapturedRequest {
         let model: String
         let systemPrompt: String
+        let userMessage: String
     }
 
     private final class RequestRecorder: @unchecked Sendable {
@@ -106,9 +128,11 @@ enum PostProcessingServiceTests {
                 let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
                 let messages = json["messages"] as? [[String: Any]] ?? []
                 let system = messages.first { $0["role"] as? String == "system" }
+                let user = messages.first { $0["role"] as? String == "user" }
                 return CapturedRequest(
                     model: json["model"] as? String ?? "",
-                    systemPrompt: system?["content"] as? String ?? ""
+                    systemPrompt: system?["content"] as? String ?? "",
+                    userMessage: user?["content"] as? String ?? ""
                 )
             }
         }
@@ -116,6 +140,7 @@ enum PostProcessingServiceTests {
 
     private static func cleanupRequests(
         dictationLanguage: String,
+        bundleIdentifier: String? = nil,
         reply: @escaping @Sendable (String) -> String
     ) -> [CapturedRequest] {
         let recorder = RequestRecorder()
@@ -137,7 +162,7 @@ enum PostProcessingServiceTests {
         )
         let context = AppContext(
             appName: nil,
-            bundleIdentifier: nil,
+            bundleIdentifier: bundleIdentifier,
             windowTitle: nil,
             selectedText: nil,
             currentActivity: "",

@@ -10,6 +10,7 @@ enum TranscriptTextCoreTests {
         testPostProcessedTranscriptSanitization()
         testHardLineBreaksAreRejoined()
         testUnicodeHyphensAreNormalized()
+        testDashesAreRewrittenAsTypedPunctuation()
         testModeSpecificSanitization()
         testInstructionExecutionGuard()
     }
@@ -118,7 +119,34 @@ enum TranscriptTextCoreTests {
             TranscriptOutputSanitizer.postProcessedTranscript(
                 "Peut\u{2011}être, c'est\u{2010}à\u{2011}dire – une pause — puis la suite."
             ),
-            "Peut-être, c'est-à-dire – une pause — puis la suite."
+            "Peut-être, c'est-à-dire, une pause, puis la suite."
+        )
+    }
+
+    private static func testDashesAreRewrittenAsTypedPunctuation() {
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.postProcessedTranscript("Il est — je crois — déjà parti."),
+            "Il est, je crois, déjà parti."
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.postProcessedTranscript("Le staging—pas la prod—est cassé."),
+            "Le staging, pas la prod, est cassé."
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.postProcessedTranscript("Créneaux de 10–12 h, pages 3 – 5."),
+            "Créneaux de 10-12 h, pages 3-5."
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.postProcessedTranscript("À faire :\n— le merge\n– la release"),
+            "À faire :\n- le merge\n- la release"
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.postProcessedTranscript("Ok, — on y va."),
+            "Ok, on y va."
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.postProcessedTranscript("Lance make check --fix."),
+            "Lance make check --fix."
         )
     }
 

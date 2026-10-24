@@ -118,17 +118,33 @@ enum TranscriptOutputSanitizer {
             return ""
         }
 
-        return joiningHardLineBreaks(normalizingHyphens(result))
+        return joiningHardLineBreaks(removingDashes(normalizingHyphens(result)))
     }
 
     /// The cleanup model sometimes writes "peut‑être" or "c'est‑à‑dire" with
     /// a Unicode hyphen (U+2010) or non-breaking hyphen (U+2011). They look
     /// identical but a search for the typed word misses them, so fold both
-    /// back to the ASCII hyphen-minus. Dashes (– —) are left alone.
+    /// back to the ASCII hyphen-minus. Dashes (– —) are handled by
+    /// `removingDashes`.
     static func normalizingHyphens(_ value: String) -> String {
         value
             .replacingOccurrences(of: "\u{2010}", with: "-")
             .replacingOccurrences(of: "\u{2011}", with: "-")
+    }
+
+    /// The speaker never types em or en dashes, and the cleanup model keeps
+    /// adding them whatever the prompt says. A dash opening a line becomes a
+    /// "- " list marker, an en dash between numbers a hyphen, and any other
+    /// dash a comma.
+    static func removingDashes(_ value: String) -> String {
+        let rewrites: [(pattern: String, template: String)] = [
+            ("(?m)^[ \\t]*[—–][ \\t]+", "- "),
+            ("(\\d)[ \\t]*–[ \\t]*(\\d)", "$1-$2"),
+            (",?[ \\t]*[—–][ \\t]*", ", ")
+        ]
+        return rewrites.reduce(value) { text, rewrite in
+            text.replacingOccurrences(of: rewrite.pattern, with: rewrite.template, options: .regularExpression)
+        }
     }
 
     /// Asked for paragraphs, the cleanup model often also puts every sentence

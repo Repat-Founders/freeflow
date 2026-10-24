@@ -16,6 +16,7 @@ struct FreeFlowTests {
         PostProcessingServiceTests.run()
         TranscriptionErrorPresentationCoreTests.run()
         TranscriptTextCoreTests.run()
+        TargetApplicationTests.run()
         VocabularyEntriesTests.run()
         AppTextInsertionCoreTests.run()
         AppTextInsertionDispatchTests.run()

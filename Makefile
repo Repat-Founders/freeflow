@@ -29,6 +29,7 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/RecordingTimerPreference.swift \
 	Sources/TranscriptionErrorPresentationCore.swift \
 	Sources/TranscriptTextCore.swift \
+	Sources/TargetApplication.swift \
 	Sources/TemperatureCapabilityCache.swift \
 	Sources/TranscriptionService.swift \
 	Sources/UpdateManager.swift \
