@@ -537,7 +537,6 @@ struct GeneralSettingsView: View {
     @State private var copiedBuildInfo = false
     @State private var copiedBuildInfoResetWorkItem: DispatchWorkItem?
     @StateObject private var githubCache = GitHubMetadataCache.shared
-    @ObservedObject private var updateManager = UpdateManager.shared
     private let freeflowRepoURL = URL(string: "https://github.com/zachlatta/freeflow")!
 
     private var appDisplayName: String {
@@ -698,9 +697,6 @@ struct GeneralSettingsView: View {
                 SettingsCard("App", icon: "power") {
                     startupSection
                 }
-                SettingsCard("Updates", icon: "arrow.triangle.2.circlepath") {
-                    updatesSection
-                }
                 SettingsCard("API Key", icon: "key.fill") {
                     apiKeySection
                 }
@@ -795,127 +791,6 @@ struct GeneralSettingsView: View {
                     }
                     .font(.caption)
                 }
-            }
-        }
-    }
-
-    // MARK: Updates
-
-    private var updatesSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Toggle("Automatically check for updates", isOn: Binding(
-                get: { updateManager.autoCheckEnabled },
-                set: { updateManager.autoCheckEnabled = $0 }
-            ))
-
-            HStack(spacing: 10) {
-                Button {
-                    Task {
-                        await updateManager.checkForUpdates(userInitiated: true)
-                    }
-                } label: {
-                    if updateManager.isChecking {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Checking...")
-                        }
-                    } else {
-                        Text("Check for Updates Now")
-                    }
-                }
-                .disabled(updateManager.isChecking || updateManager.updateStatus != .idle)
-
-                if let lastCheck = updateManager.lastCheckDate {
-                    Text("Last checked: \(lastCheck.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if updateManager.updateAvailable {
-                VStack(alignment: .leading, spacing: 8) {
-                    switch updateManager.updateStatus {
-                    case .downloading:
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .foregroundStyle(.blue)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Downloading update...")
-                                    .font(.caption.weight(.semibold))
-                                ProgressView(value: updateManager.downloadProgress ?? 0)
-                                    .progressViewStyle(.linear)
-                                if let progress = updateManager.downloadProgress {
-                                    Text("\(Int(progress * 100))%")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            Button("Cancel") {
-                                updateManager.cancelDownload()
-                            }
-                            .font(.caption)
-                        }
-
-                    case .installing:
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Installing update...")
-                                .font(.caption.weight(.semibold))
-                        }
-
-                    case .readyToRelaunch:
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Relaunching...")
-                                .font(.caption.weight(.semibold))
-                        }
-
-                    case .error(let message):
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.red)
-                            Text(message)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                            Spacer()
-                            Button("Retry") {
-                                updateManager.updateStatus = .idle
-                                if let release = updateManager.latestRelease {
-                                    updateManager.downloadAndInstall(release: release)
-                                }
-                            }
-                            .font(.caption)
-                        }
-
-                    case .idle:
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .foregroundStyle(.blue)
-                            Text(updateManager.latestReleaseVersion.isEmpty
-                                ? "A new version of \(AppName.displayName) is available!"
-                                : "\(AppName.displayName) v\(updateManager.latestReleaseVersion) is available!")
-                                .font(.caption.weight(.semibold))
-                            Spacer()
-                            Button("What's New") {
-                                updateManager.showReleaseNotes()
-                            }
-                            .font(.caption)
-                            Button("Update Now") {
-                                if let release = updateManager.latestRelease {
-                                    updateManager.downloadAndInstall(release: release)
-                                }
-                            }
-                            .font(.caption)
-                        }
-                    }
-                }
-                .padding(10)
-                .background(Color.blue.opacity(0.1))
-                .cornerRadius(6)
             }
         }
     }
